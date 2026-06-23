@@ -20,7 +20,7 @@ from ..utils import is_given, log_exceptions
 from ..utils.aio import cancel_and_wait
 from ..utils.audio import audio_frames_from_file
 from .agent_session import AgentSession
-from .events import AgentStateChangedEvent
+from .events import AgentStateChangedEvent, UserStateChangedEvent
 
 _resource_stack = contextlib.ExitStack()
 atexit.register(_resource_stack.close)
@@ -136,6 +136,9 @@ class BackgroundAudioPlayer:
         self,
         *,
         ambient_sound: NotGivenOr[AudioSource | AudioConfig | list[AudioConfig] | None] = NOT_GIVEN,
+        eos_sound: NotGivenOr[
+            AudioSource | AudioConfig | list[AudioConfig] | None
+        ] = NOT_GIVEN,
         thinking_sound: NotGivenOr[
             AudioSource | AudioConfig | list[AudioConfig] | None
         ] = NOT_GIVEN,
@@ -159,6 +162,12 @@ class BackgroundAudioPlayer:
                 The ambient sound to be played continuously. For file paths, the sound will be looped.
                 For AsyncIterator sources, ensure the iterator is infinite or looped.
 
+            eos_sound (NotGivenOr[Union[AudioSource, AudioConfig, List[AudioConfig], None]], optional):
+                The sound to be played once when the user finishes speaking (end-of-speech), to fill
+                the gap before the agent responds. Played at most once per user turn, skipped while the
+                agent is already thinking/speaking, and fired only ~50% of the time. Requires
+                ``agent_session`` to be provided to ``start``.
+
             thinking_sound (NotGivenOr[Union[AudioSource, AudioConfig, List[AudioConfig], None]], optional):
                 The sound to be played when the associated agent enters a “thinking” state. This can be a single
                 sound source or a list of AudioConfig objects (with volume and probability settings).
@@ -166,6 +175,7 @@ class BackgroundAudioPlayer:
         """  # noqa: E501
 
         self._ambient_sound = ambient_sound if is_given(ambient_sound) else None
+        self._eos_sound = eos_sound if is_given(eos_sound) else None
         self._thinking_sound = thinking_sound if is_given(thinking_sound) else None
 
         self._audio_source = rtc.AudioSource(48000, 1, queue_size_ms=_AUDIO_SOURCE_BUFFER_MS)
@@ -181,9 +191,11 @@ class BackgroundAudioPlayer:
 
         self._ambient_handle: PlayHandle | None = None
         self._thinking_handle: PlayHandle | None = None
-        # Last thinking sound that was actually played, so we can avoid
-        # selecting the same one twice in a row (see _agent_state_changed).
+        self._eos_handle: PlayHandle | None = None
+        # Last sound actually played for each slot, so we can avoid selecting
+        # the same one twice in a row (see _agent_state_changed / _user_state_changed).
         self._last_thinking_sound: AudioSource | None = None
+        self._last_eos_sound: AudioSource | None = None
 
     def _select_sound_from_list(
         self, sounds: list[AudioConfig], exclude: AudioSource | None = None
@@ -356,6 +368,7 @@ class BackgroundAudioPlayer:
 
             if self._agent_session:
                 self._agent_session.on("agent_state_changed", self._agent_state_changed)
+                self._agent_session.on("user_state_changed", self._user_state_changed)
 
             if self._ambient_sound:
                 cfg = self._normalize_sound_source(self._ambient_sound)
@@ -382,6 +395,7 @@ class BackgroundAudioPlayer:
 
             if self._agent_session:
                 self._agent_session.off("agent_state_changed", self._agent_state_changed)
+                self._agent_session.off("user_state_changed", self._user_state_changed)
 
             with contextlib.suppress(Exception):
                 # The cached publication SID may be stale if the SDK
@@ -398,6 +412,15 @@ class BackgroundAudioPlayer:
         return None
 
     def _agent_state_changed(self, ev: AgentStateChangedEvent) -> None:
+        # Stop the EOS filler as soon as the agent is about to speak. While an
+        # EOS filler is still playing for any other transition, don't also kick
+        # off a thinking sound on top of it.
+        if self._eos_handle and not self._eos_handle.done():
+            if ev.new_state == "speaking":
+                self._eos_handle.stop()
+            else:
+                return
+
         if not self._thinking_sound:
             return
 
@@ -418,6 +441,33 @@ class BackgroundAudioPlayer:
 
         elif self._thinking_handle:
             self._thinking_handle.stop()
+
+    def _user_state_changed(self, ev: UserStateChangedEvent) -> None:
+        # EOS filler: play once right after the user finishes speaking
+        # (speaking -> listening), to fill the gap before the agent responds.
+        if ev.new_state != "listening" or ev.old_state != "speaking":
+            return
+
+        if not self._eos_sound:
+            return
+
+        # Skip EOS when the agent is already thinking/speaking, to avoid
+        # playing the filler over/into the agent's own speech.
+        if self._agent_session and self._agent_session.agent_state in ("thinking", "speaking"):
+            return
+
+        if self._eos_handle and not self._eos_handle.done():
+            return
+
+        # Stay silent ~50% of the time so the filler doesn't fire every turn.
+        if random.random() < 0.5:
+            return
+
+        assert self._eos_sound is not None
+        cfg = self._normalize_sound_source(self._eos_sound, exclude=self._last_eos_sound)
+        if cfg is not None:
+            self._eos_handle = self.play(cfg)
+            self._last_eos_sound = cfg.source
 
     @log_exceptions(logger=logger)
     async def _play_task(self, play_handle: PlayHandle, cfg: AudioConfig, loop: bool) -> None:
