@@ -10,12 +10,11 @@ from livekit.agents import (
     MetricsCollectedEvent,
     RunContext,
     cli,
-    inference,
     metrics,
     room_io,
 )
 from livekit.agents.llm import function_tool
-from livekit.plugins import soniox
+from livekit.plugins import deepgram, openai, soniox
 from livekit.plugins.soniox.tts import MAX_SPEED, MIN_SPEED
 
 logger = logging.getLogger("soniox-tts-agent")
@@ -70,10 +69,11 @@ async def entrypoint(ctx: JobContext) -> None:
     tts = soniox.TTS(voice="Maya", speed=1.0)
 
     session: AgentSession = AgentSession(
-        # STT and LLM here still need their own provider keys (see the inference
-        # docs); swap them for any provider you already have configured.
-        stt=inference.STT("deepgram/nova-3", language="multi"),
-        llm=inference.LLM("openai/gpt-4.1-mini"),
+        # Direct provider plugins: no LiveKit Cloud credentials needed, each
+        # reads its own key from the environment (DEEPGRAM_API_KEY,
+        # OPENAI_API_KEY). Swap for any provider you have keys for.
+        stt=deepgram.STT(model="nova-3", language="multi"),
+        llm=openai.LLM(model="gpt-4.1-mini"),
         tts=tts,
     )
 
