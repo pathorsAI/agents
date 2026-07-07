@@ -8,12 +8,15 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     MetricsCollectedEvent,
+    RunContext,
     cli,
     inference,
     metrics,
     room_io,
 )
+from livekit.agents.llm import function_tool
 from livekit.plugins import soniox
+from livekit.plugins.soniox.tts import MAX_SPEED, MIN_SPEED
 
 logger = logging.getLogger("soniox-tts-agent")
 
@@ -21,15 +24,37 @@ load_dotenv()
 
 
 class MyAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, tts: soniox.TTS) -> None:
         super().__init__(
             instructions="Your name is Kelly. You interact with users via voice, "
             "so keep your responses concise and to the point. "
-            "Do not use emojis, asterisks, markdown, or other special characters."
+            "Do not use emojis, asterisks, markdown, or other special characters. "
+            "If the user asks you to speak faster or slower, call the "
+            "set_speaking_speed tool to adjust your voice."
         )
+        # Keep a typed reference to the Soniox TTS so tools can retune it live.
+        # session.tts is typed as the provider-agnostic base and does not expose
+        # update_options, so we hold the concrete instance here.
+        self._tts = tts
 
     async def on_enter(self) -> None:
         self.session.generate_reply(instructions="greet the user and introduce yourself")
+
+    @function_tool
+    async def set_speaking_speed(self, context: RunContext, speed: float) -> str:
+        """Adjust how fast you speak, effective from your next reply.
+
+        Args:
+            speed: Target speaking rate. 1.0 is normal, lower is slower, higher
+                is faster. Accepted range is 0.7 to 1.3.
+        """
+        clamped = max(MIN_SPEED, min(MAX_SPEED, speed))
+        self._tts.update_options(speed=clamped)
+        logger.info("updated Soniox TTS speed to %s", clamped)
+
+        if clamped != speed:
+            return f"Speaking speed set to {clamped}, the closest allowed value to {speed}."
+        return f"Speaking speed set to {clamped}."
 
 
 server = AgentServer()
@@ -39,14 +64,17 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room": ctx.room.name}
 
+    # Soniox TTS. `speed` controls the speaking rate (range 0.7-1.3, 1.0 is
+    # normal) and can be retuned mid-session via update_options (see the
+    # set_speaking_speed tool). Requires SONIOX_API_KEY in the environment.
+    tts = soniox.TTS(voice="Maya", speed=1.0)
+
     session: AgentSession = AgentSession(
         # STT and LLM here still need their own provider keys (see the inference
         # docs); swap them for any provider you already have configured.
         stt=inference.STT("deepgram/nova-3", language="multi"),
         llm=inference.LLM("openai/gpt-4.1-mini"),
-        # Soniox TTS. `speed` controls the speaking rate (range 0.7-1.3, 1.0 is
-        # normal). Requires SONIOX_API_KEY in the environment.
-        tts=soniox.TTS(voice="Maya", speed=1.0),
+        tts=tts,
     )
 
     @session.on("metrics_collected")
@@ -54,7 +82,7 @@ async def entrypoint(ctx: JobContext) -> None:
         metrics.log_metrics(ev.metrics)
 
     await session.start(
-        agent=MyAgent(),
+        agent=MyAgent(tts),
         room=ctx.room,
         room_options=room_io.RoomOptions(),
     )
