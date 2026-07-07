@@ -2069,6 +2069,10 @@ class AgentActivity(RecognitionHooks):
         )
 
     def on_eot_prediction(self, ev: EotPredictionEvent) -> None:
+        # Surface as a public session event so local (non-remote) sessions can
+        # observe it and it lands in SessionReport via _recorded_events.
+        # Upstream only forwards to the remote session host.
+        self._session.emit("eot_prediction", ev)
         if (host := self._session._session_host) is not None:
             host._on_eot_prediction(ev)
 

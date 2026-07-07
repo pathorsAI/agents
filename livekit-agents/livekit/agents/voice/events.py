@@ -288,6 +288,7 @@ EventTypes = Literal[
     "metrics_collected",
     "session_usage_updated",
     "speech_created",
+    "eot_prediction",
     "error",
     "close",
     "debug_message",
@@ -517,6 +518,7 @@ AgentEvent = Annotated[
     | ConversationItemAddedEvent
     | FunctionToolsExecutedEvent
     | SpeechCreatedEvent
+    | EotPredictionEvent
     | ErrorEvent
     | CloseEvent
     | OverlappingSpeechEvent,
