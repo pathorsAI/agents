@@ -1275,7 +1275,15 @@ class RealtimeSession(llm.RealtimeSession):
                     except ValueError as e:
                         logger.error(f"Error creating audio frame from Gemini data: {e}")
 
-        if input_transcription := server_content.input_transcription:
+        # Some models (e.g. gemini-3.1-flash-live-preview) keep sending
+        # input_transcription even when input_audio_transcription is explicitly
+        # disabled. Honor the config client-side: drop it so it never reaches
+        # events / chat context (the user transcript is expected to come from an
+        # external STT in that setup).
+        if (
+            self._opts.input_audio_transcription is not None
+            and (input_transcription := server_content.input_transcription)
+        ):
             text = input_transcription.text
             if text:
                 if current_gen.input_transcription == "":
@@ -1548,7 +1556,14 @@ class RealtimeSession(llm.RealtimeSession):
             or (
                 sc.output_transcription and sc.output_transcription and sc.output_transcription.text
             )
-            or (sc.input_transcription and sc.input_transcription and sc.input_transcription.text)
+            # input_transcription only counts when it is enabled — a disabled-but-
+            # still-sent transcript (3.1 ignores the config) must not open a
+            # phantom generation (_handle_server_content drops it anyway).
+            or (
+                self._opts.input_audio_transcription is not None
+                and sc.input_transcription
+                and sc.input_transcription.text
+            )
             # or (sc.generation_complete is not None)
             # or (sc.turn_complete is not None)
         ):
