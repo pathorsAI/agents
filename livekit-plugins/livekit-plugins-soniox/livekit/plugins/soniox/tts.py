@@ -84,6 +84,7 @@ class TTS(tts.TTS):
         api_key: str | None = None,
         websocket_url: str = WEBSOCKET_URL,
         http_session: aiohttp.ClientSession | None = None,
+        client_reference_id: str | None = None,
     ) -> None:
         """Initialize instance of Soniox Text-to-Speech API service.
 
@@ -99,6 +100,8 @@ class TTS(tts.TTS):
             api_key (str): Soniox API key. If not provided, will look for SONIOX_API_KEY env variable.
             websocket_url (str): Base WebSocket URL for Soniox TTS API.
             http_session (aiohttp.ClientSession): Optional aiohttp.ClientSession to use for requests.
+            client_reference_id (str): Optional client-defined identifier recorded with each
+                request in Soniox usage logs (usable for cost attribution). Optional.
         """
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
@@ -123,6 +126,7 @@ class TTS(tts.TTS):
             speed=speed,
             websocket_url=websocket_url,
             api_key=api_key,
+            client_reference_id=client_reference_id,
         )
         self._session = http_session
         self._streams = weakref.WeakSet[SynthesizeStream]()
@@ -335,6 +339,7 @@ class _TTSOptions:
     speed: float
     websocket_url: str
     api_key: str
+    client_reference_id: str | None = None
 
 
 @dataclass
@@ -512,6 +517,8 @@ class _Connection:
                     }
                     if msg.opts.bitrate is not None:
                         config["bitrate"] = msg.opts.bitrate
+                    if msg.opts.client_reference_id is not None:
+                        config["client_reference_id"] = msg.opts.client_reference_id
                     await self._ws.send_str(json.dumps(config))
                 elif isinstance(msg, _SendText):
                     payload: dict[str, Any] = {"stream_id": msg.stream_id}
