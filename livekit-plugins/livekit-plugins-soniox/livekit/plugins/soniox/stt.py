@@ -48,6 +48,9 @@ BASE_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
 # WebSocket messages and tokens.
 KEEPALIVE_MESSAGE = '{"type": "keepalive"}'
+# Asks Soniox to promote everything it is still holding to final tokens and emit <fin>,
+# instead of waiting for its own endpoint detection to be confident the speaker stopped.
+FINALIZE_MESSAGE = '{"type": "finalize"}'
 END_TOKEN = "<end>"
 FINALIZED_TOKEN = "<fin>"
 
@@ -138,10 +141,37 @@ class STTOptions:
     Leave as None to use the server-side default.
     Introduced in the Soniox v5 model; earlier models reject it."""
 
+    vad_finalize: bool = True
+    """Let the agent's VAD close each turn instead of waiting on Soniox's endpointing.
+
+    Soniox emits interim tokens within a few hundred ms, but the FINAL transcript is
+    gated on its endpoint detector deciding the speaker is done -- and on conversational
+    audio that decision routinely runs out the clock at ``max_endpoint_delay_ms``. The
+    agent's VAD already knows, so with this on the stream sends a finalize the moment it
+    reports end of speech and the transcript comes back without that wait.
+
+    Trade-off: Soniox then transcribes with less trailing context, so a token it would
+    have corrected using later audio can stay wrong. Turn off to restore provider-side
+    endpointing."""
+
+    enable_endpoint_detection: bool = True
+    """Whether Soniox also runs its own endpoint detection.
+
+    Independent of ``vad_finalize`` -- with both on, whichever fires first ends the
+    segment, which keeps provider endpointing as a fallback while VAD-driven finalize is
+    being validated. Turning this off makes segmentation purely VAD-driven, and is only
+    safe while ``vad_finalize`` is on: with both off the stream emits no ``<end>``/
+    ``<fin>`` at all and no final transcript ever arrives."""
+
     client_reference_id: str | None = None
     translation: TranslationConfig | None = None
 
     def __post_init__(self) -> None:
+        if not self.enable_endpoint_detection and not self.vad_finalize:
+            raise ValueError(
+                "enable_endpoint_detection and vad_finalize cannot both be disabled: "
+                "nothing would ever finalize a segment and no final transcript would be emitted"
+            )
         if not (500 <= self.max_endpoint_delay_ms <= 3000):
             raise ValueError("max_endpoint_delay_ms must be between 500 and 3000")
         if self.endpoint_sensitivity is not None and not (-1.0 <= self.endpoint_sensitivity <= 1.0):
@@ -188,6 +218,7 @@ class STT(stt.STT):
                 aligned_transcript="chunk",
                 offline_recognize=False,
                 diarization=params.enable_speaker_diarization,
+                vad_finalize=params.vad_finalize,
             )
         )
 
@@ -271,7 +302,7 @@ class SpeechStream(stt.SpeechStream):
             "model": self._stt._params.model,
             "audio_format": "pcm_s16le",
             "num_channels": self._stt._params.num_channels or 1,
-            "enable_endpoint_detection": True,
+            "enable_endpoint_detection": self._stt._params.enable_endpoint_detection,
             "sample_rate": self._stt._params.sample_rate,
             "language_hints": self._stt._params.language_hints,
             "language_hints_strict": self._stt._params.language_hints_strict,
@@ -409,6 +440,15 @@ class SpeechStream(stt.SpeechStream):
             return
 
         async for data in self._input_ch:
+            if isinstance(data, self._FlushSentinel):
+                # End of speech from the agent's VAD (see STTOptions.vad_finalize).
+                # Enqueued rather than sent straight on the websocket so it stays behind
+                # the audio already waiting in the queue -- overtaking it would finalize
+                # a stream that is still missing its last frames and cut words off.
+                if self._stt._params.vad_finalize:
+                    self.audio_queue.put_nowait(FINALIZE_MESSAGE)
+                continue
+
             if isinstance(data, rtc.AudioFrame):
                 # Get the raw bytes from the audio frame.
                 pcm_data = data.data.tobytes()
@@ -533,6 +573,16 @@ class SpeechStream(stt.SpeechStream):
                             continue
                         if token["is_final"]:
                             if is_end_token(token):
+                                # send_endpoint_transcript() emits `final` only, so any
+                                # token still pending here is dropped from the transcript.
+                                # Soniox is expected to promote them ahead of the end
+                                # token; if it does not, this is where words go missing.
+                                if non_final.text:
+                                    logger.warning(
+                                        "endpoint reached with non-final tokens pending; "
+                                        "they will be dropped from the final transcript",
+                                        extra={"pending": non_final.text},
+                                    )
                                 send_endpoint_transcript()
                                 self._report_processed_audio_duration(
                                     total_audio_proc_ms,

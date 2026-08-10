@@ -89,6 +89,10 @@ class FallbackAdapter(
                 aligned_transcript=aligned_transcript,
                 keyterms=any(t.capabilities.keyterms for t in stt),
                 chat_context=any(t.capabilities.chat_context for t in stt),
+                # all(), not any(): the flush is only forwarded when every candidate can
+                # act on it, so failing over never lands on an STT that would sit waiting
+                # for a finalize signal it does not understand.
+                vad_finalize=all(t.capabilities.vad_finalize for t in stt),
             )
         )
 

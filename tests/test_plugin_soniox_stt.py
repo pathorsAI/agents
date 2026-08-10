@@ -568,3 +568,104 @@ async def test_final_transcript_no_translation_code_switched_populates_source_ru
     assert sd.target_texts is None
     assert sd.source_texts is not None
     assert "".join(sd.source_texts) == sd.text
+
+
+# ---------------------------------------------------------------------------
+# VAD-driven finalize (STTOptions.vad_finalize)
+# ---------------------------------------------------------------------------
+
+
+def test_vad_finalize_defaults_on_and_is_advertised_as_a_capability():
+    from livekit.plugins.soniox import STT
+
+    # The capability is what makes AudioRecognition send a FlushSentinel at end of
+    # speech; without it advertised, the plugin-side handling below is never reached.
+    assert STT(api_key="fake").capabilities.vad_finalize is True
+
+
+def test_vad_finalize_off_is_not_advertised():
+    from livekit.plugins.soniox import STT, STTOptions
+
+    stt_instance = STT(api_key="fake", params=STTOptions(vad_finalize=False))
+    assert stt_instance.capabilities.vad_finalize is False
+
+
+def test_disabling_both_finalize_paths_is_rejected():
+    from livekit.plugins.soniox import STTOptions
+
+    # Nothing would ever emit <end>/<fin>, so no final transcript would arrive and the
+    # turn would never commit. Fail loudly at construction instead of going mute at runtime.
+    with pytest.raises(ValueError, match="cannot both be disabled"):
+        STTOptions(enable_endpoint_detection=False, vad_finalize=False)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_enable_endpoint_detection_websocket_config(enabled: bool):
+    from livekit.plugins.soniox import STTOptions
+
+    stream = _make_stream()
+    stream._stt._params = STTOptions(enable_endpoint_detection=enabled)
+
+    class FakeWebSocket:
+        config: dict[str, Any] | None = None
+
+        async def send_str(self, message: str) -> None:
+            self.config = json.loads(message)
+
+    class FakeSession:
+        def __init__(self, ws: FakeWebSocket) -> None:
+            self.ws = ws
+
+        async def ws_connect(self, url: str) -> FakeWebSocket:
+            return self.ws
+
+    ws = FakeWebSocket()
+    stream._stt._http_session = FakeSession(ws)
+
+    await stream._connect_ws()
+
+    assert ws.config is not None
+    assert ws.config["enable_endpoint_detection"] is enabled
+
+
+async def test_flush_sentinel_enqueues_finalize_behind_pending_audio():
+    from livekit import rtc
+    from livekit.agents.utils import aio
+    from livekit.plugins.soniox import STTOptions
+    from livekit.plugins.soniox.stt import FINALIZE_MESSAGE
+
+    stream = _make_stream()
+    stream._stt._params = STTOptions()
+    stream._ws = MagicMock()
+
+    frame = rtc.AudioFrame(
+        data=b"\x00\x00" * 160, sample_rate=16000, num_channels=1, samples_per_channel=160
+    )
+    stream._input_ch = aio.Chan()
+    stream._input_ch.send_nowait(frame)
+    stream._input_ch.send_nowait(stream._FlushSentinel())
+    stream._input_ch.close()
+
+    await stream._prepare_audio_task()
+
+    queued = [stream.audio_queue.get_nowait() for _ in range(stream.audio_queue.qsize())]
+    # Order is the point: finalizing ahead of queued audio would make Soniox cut the
+    # transcript short at whatever it had already received.
+    assert queued == [frame.data.tobytes(), FINALIZE_MESSAGE]
+
+
+async def test_flush_sentinel_is_ignored_when_vad_finalize_is_off():
+    from livekit.agents.utils import aio
+    from livekit.plugins.soniox import STTOptions
+
+    stream = _make_stream()
+    stream._stt._params = STTOptions(vad_finalize=False)
+    stream._ws = MagicMock()
+
+    stream._input_ch = aio.Chan()
+    stream._input_ch.send_nowait(stream._FlushSentinel())
+    stream._input_ch.close()
+
+    await stream._prepare_audio_task()
+
+    assert stream.audio_queue.qsize() == 0
