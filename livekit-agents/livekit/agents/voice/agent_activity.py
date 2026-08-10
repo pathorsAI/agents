@@ -1319,6 +1319,7 @@ class AgentActivity(RecognitionHooks):
             stt_aligned_transcript=bool(self.stt.capabilities.aligned_transcript)
             if self.stt
             else False,
+            stt_vad_finalize=self.stt.capabilities.vad_finalize if self.stt else False,
         )
         stt_pipeline = reuse_resources.stt_pipeline if reuse_resources else None
         turn_detector_stream = reuse_resources.turn_detector_stream if reuse_resources else None

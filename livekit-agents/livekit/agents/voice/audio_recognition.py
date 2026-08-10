@@ -29,7 +29,7 @@ from ..language import LanguageCode
 from ..log import logger
 from ..stt import SpeechEvent
 from ..telemetry import trace_types, tracer
-from ..types import NOT_GIVEN, NotGivenOr
+from ..types import NOT_GIVEN, FlushSentinel, NotGivenOr
 from ..utils import aio, is_given
 from ..vad import VADStream
 from . import io
@@ -173,7 +173,9 @@ class _STTPipeline:
         self._stt_node = stt_node
         # don't recreate the stream while the session is closing
         self._is_closing = is_closing or (lambda: False)
-        self._audio_ch = aio.Chan[rtc.AudioFrame]()
+        # Carries audio plus, for vad_finalize STTs, a FlushSentinel per end of speech.
+        # One channel for both keeps the sentinel ordered behind the audio it follows.
+        self._audio_ch = aio.Chan[rtc.AudioFrame | FlushSentinel]()
         self._event_ch = aio.Chan[stt.SpeechEvent]()
         self._pump_task = asyncio.create_task(self._stt_pump())
         self._pump_task.add_done_callback(lambda _: self._event_ch.close())
@@ -181,7 +183,7 @@ class _STTPipeline:
         self.input_started_at: float | None = None
 
     @property
-    def audio_ch(self) -> aio.Chan[rtc.AudioFrame]:
+    def audio_ch(self) -> aio.Chan[rtc.AudioFrame | FlushSentinel]:
         return self._audio_ch
 
     @property
@@ -255,6 +257,7 @@ class AudioRecognition:
         stt_model: str | None = None,
         stt_provider: str | None = None,
         stt_aligned_transcript: bool = False,
+        stt_vad_finalize: bool = False,
     ) -> None:
         self._session = session
         self._hooks = hooks
@@ -267,6 +270,7 @@ class AudioRecognition:
         self._turn_detector = turn_detection if not isinstance(turn_detection, str) else None
         self._stt = stt
         self._vad = vad
+        self._stt_vad_finalize = stt_vad_finalize
         self._stt_model = stt_model
         self._stt_provider = stt_provider
         self._stt_aligned_transcript = stt_aligned_transcript
@@ -743,6 +747,23 @@ class AudioRecognition:
         self._interruption_enabled = enabled
         if not enabled:
             self._flush_held_transcripts()
+
+    def _finalize_stt_turn(self) -> None:
+        """Ask a ``vad_finalize`` STT to close the current segment now.
+
+        Providers that endpoint server-side hold the final transcript until they are
+        confident the speaker stopped -- a wait the agent does not need, because the VAD
+        has already decided. For STTs that opt in, push a FlushSentinel down the audio
+        channel so the stream finalizes immediately; the sentinel travels behind every
+        frame already queued, so nothing is cut off.
+
+        No-op for every other STT: they never see the sentinel and keep their own
+        endpointing.
+        """
+        if self._stt_pipeline is None or not self._stt_vad_finalize:
+            return
+
+        self._stt_pipeline.audio_ch.send_nowait(FlushSentinel())
 
     def _push_audio(
         self, frame: rtc.AudioFrame, *, stt_frame: rtc.AudioFrame | None = None
@@ -1443,6 +1464,8 @@ class AudioRecognition:
                     ev.speech_duration,
                     delay=ev.silence_duration + ev.inference_duration,
                 )
+
+            self._finalize_stt_turn()
 
             if self._vad_base_turn_detection or (
                 self._turn_detection_mode == "stt" and self._user_turn_committed

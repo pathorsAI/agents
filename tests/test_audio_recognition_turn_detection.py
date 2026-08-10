@@ -61,6 +61,7 @@ def _make_full_recognition_for_eou() -> AudioRecognition:
     ar._stt_pipeline = None
     ar._turn_backchannel_over_agent = False
     ar._transcription_timeout_handle = None
+    ar._stt_vad_finalize = False
     ar._audio_transcript = ""
     ar._turn_detection_mode = "vad"
 

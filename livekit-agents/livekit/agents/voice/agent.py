@@ -372,7 +372,9 @@ class Agent:
         )
 
     def stt_node(
-        self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
+        self,
+        audio: AsyncIterable[rtc.AudioFrame | FlushSentinel],
+        model_settings: ModelSettings,
     ) -> (
         AsyncIterable[stt.SpeechEvent | str]
         | Coroutine[Any, Any, AsyncIterable[stt.SpeechEvent | str]]
@@ -389,7 +391,11 @@ class Agent:
         custom pre-processing of audio, additional buffering, or alternative STT strategies).
 
         Args:
-            audio (AsyncIterable[rtc.AudioFrame]): An asynchronous stream of audio frames.
+            audio: An asynchronous stream of audio frames. When the configured STT sets
+                ``STTCapabilities.vad_finalize``, the stream also carries a
+                :class:`FlushSentinel` at each VAD end of speech; custom implementations
+                should forward it to ``RecognizeStream.flush()`` (or pass it through)
+                rather than treat it as audio.
             model_settings (ModelSettings): Configuration and parameters for model execution.
 
         Yields:
@@ -503,7 +509,9 @@ class Agent:
     class default:
         @staticmethod
         async def stt_node(
-            agent: Agent, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
+            agent: Agent,
+            audio: AsyncIterable[rtc.AudioFrame | FlushSentinel],
+            model_settings: ModelSettings,
         ) -> AsyncGenerator[stt.SpeechEvent, None]:
             """Default implementation for `Agent.stt_node`"""
             activity = agent._get_activity_or_raise()
@@ -543,7 +551,14 @@ class Agent:
                     @utils.log_exceptions(logger=logger)
                     async def _forward_input() -> None:
                         async for frame in audio:
-                            stream.push_frame(frame)
+                            # A FlushSentinel marks end of speech (see STTCapabilities.vad_finalize).
+                            # It rides the same channel as the audio so the provider only sees it
+                            # after every frame that preceded it -- finalizing on a stream that is
+                            # still missing its last frames would truncate the transcript.
+                            if isinstance(frame, FlushSentinel):
+                                stream.flush()
+                            else:
+                                stream.push_frame(frame)
 
                     forward_task = asyncio.create_task(_forward_input())
                     try:

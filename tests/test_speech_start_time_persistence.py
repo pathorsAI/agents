@@ -47,6 +47,7 @@ class TestUserTurnStartPersistence:
         audio_recognition._user_silence_ev = asyncio.Event()
         audio_recognition._speaking = False
         audio_recognition._agent_speaking = False
+        audio_recognition._stt_vad_finalize = False
         audio_recognition._turn_detector_stream = None
         audio_recognition._end_of_turn_task = None
         audio_recognition._user_turn_span = None

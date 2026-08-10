@@ -16,7 +16,7 @@ from .agent import ModelSettings
 
 # TODO(theomonnom): can those types be simplified?
 STTNode = Callable[
-    [AsyncIterable[rtc.AudioFrame], ModelSettings],
+    [AsyncIterable[rtc.AudioFrame | FlushSentinel], ModelSettings],
     AsyncIterable[stt.SpeechEvent | str]
     | None
     | Awaitable[AsyncIterable[stt.SpeechEvent | str] | None],

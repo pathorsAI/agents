@@ -140,6 +140,17 @@ class STTCapabilities:
     """Whether the STT supports keyterm prompting"""
     chat_context: bool = False
     """Whether the STT can natively consume conversation context (see STT._push_conversation_item)"""
+    vad_finalize: bool = False
+    """Whether turn finalization should be driven by the agent's VAD.
+
+    When True, the pipeline calls :meth:`RecognizeStream.flush` as soon as the local VAD
+    reports end of speech, and the stream is expected to turn the resulting
+    ``_FlushSentinel`` into a provider-side finalize request. This trades the provider's
+    own endpoint detection -- which waits to be sure the speaker is done -- for the
+    decision the agent's VAD has already made, taking that wait out of the turn.
+
+    Leave False for providers whose endpointing should stay server-side: they then never
+    see a ``_FlushSentinel`` mid-stream and keep their current behaviour."""
 
 
 class STTError(BaseModel):
