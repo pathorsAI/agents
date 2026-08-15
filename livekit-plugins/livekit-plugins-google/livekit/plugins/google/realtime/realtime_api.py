@@ -1430,9 +1430,8 @@ class RealtimeSession(llm.RealtimeSession):
         # disabled. Honor the config client-side: drop it so it never reaches
         # events / chat context (the user transcript is expected to come from an
         # external STT in that setup).
-        if (
-            self._opts.input_audio_transcription is not None
-            and (input_transcription := server_content.input_transcription)
+        if self._opts.input_audio_transcription is not None and (
+            input_transcription := server_content.input_transcription
         ):
             text = input_transcription.text
             if text:
