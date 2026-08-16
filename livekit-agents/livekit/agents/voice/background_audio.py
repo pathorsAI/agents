@@ -136,9 +136,7 @@ class BackgroundAudioPlayer:
         self,
         *,
         ambient_sound: NotGivenOr[AudioSource | AudioConfig | list[AudioConfig] | None] = NOT_GIVEN,
-        eos_sound: NotGivenOr[
-            AudioSource | AudioConfig | list[AudioConfig] | None
-        ] = NOT_GIVEN,
+        eos_sound: NotGivenOr[AudioSource | AudioConfig | list[AudioConfig] | None] = NOT_GIVEN,
         thinking_sound: NotGivenOr[
             AudioSource | AudioConfig | list[AudioConfig] | None
         ] = NOT_GIVEN,
