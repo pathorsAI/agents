@@ -1093,6 +1093,16 @@ class AgentActivity(RecognitionHooks):
             self.llm.off("error", self._on_error)
 
         if isinstance(self.llm, llm.RealtimeModel) and self._rt_session is not None:
+            # give the session a bounded chance to flush an in-flight usage/metrics
+            # event (e.g. Gemini's end-of-turn usageMetadata) BEFORE detaching the
+            # listeners below — otherwise the last generation's usage is emitted into
+            # the void and never reaches session.usage.
+            try:
+                await self._rt_session.drain_pending_metrics()
+            except Exception:
+                logger.warning(
+                    "error draining pending realtime metrics before close", exc_info=True
+                )
             self._rt_session.off("generation_created", self._on_generation_created)
             self._rt_session.off("input_speech_started", self._on_input_speech_started)
             self._rt_session.off("input_speech_stopped", self._on_input_speech_stopped)
