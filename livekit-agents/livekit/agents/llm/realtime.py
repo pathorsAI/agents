@@ -298,6 +298,17 @@ class RealtimeSession(ABC, rtc.EventEmitter[EventTypes | TEvent], Generic[TEvent
         audio_transcript: NotGivenOr[str] = NOT_GIVEN,
     ) -> None: ...
 
+    async def drain_pending_metrics(self) -> None:
+        """Wait (bounded) for metrics the provider has not delivered yet.
+
+        Called by the framework right before the session's event listeners are
+        detached at teardown, so a usage/metrics event that is still in flight can
+        be emitted and collected. Providers that report usage asynchronously
+        relative to playback (e.g. Gemini Live's end-of-turn usageMetadata)
+        override this; the default is a no-op.
+        """
+        return None
+
     @abstractmethod
     async def aclose(self) -> None: ...
 
