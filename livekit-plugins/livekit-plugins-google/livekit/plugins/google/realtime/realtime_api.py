@@ -47,6 +47,32 @@ DEFAULT_IMAGE_ENCODE_OPTIONS = images.EncodeOptions(
 
 lk_google_debug = resolve_env_int("LK_GOOGLE_DEBUG")
 
+# Bounded grace (seconds) to wait for the current generation's usageMetadata when the
+# session is being torn down. Gemini Live reports token usage only at the end of a
+# generation, so a caller hanging up during (or right at the end of) an utterance would
+# otherwise close the websocket before the usage event arrives — silently dropping the
+# last generation's token usage (on a one-turn call: all of it). <= 0 disables the wait.
+_DEFAULT_USAGE_DRAIN_TIMEOUT = 2.0
+
+
+def _resolve_usage_drain_timeout() -> float:
+    # read at import time: a blank or malformed value must not break the import (see #7470)
+    raw = os.environ.get("LK_GOOGLE_USAGE_DRAIN_TIMEOUT")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_USAGE_DRAIN_TIMEOUT
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid LK_GOOGLE_USAGE_DRAIN_TIMEOUT=%r, expected a number; using %s",
+            raw,
+            _DEFAULT_USAGE_DRAIN_TIMEOUT,
+        )
+        return _DEFAULT_USAGE_DRAIN_TIMEOUT
+
+
+lk_google_usage_drain_timeout = _resolve_usage_drain_timeout()
+
 
 class _ChatCtxContent(types.LiveClientContent):
     """Client content built from chat ctx items; the ids let the send task mark them sent."""
@@ -217,6 +243,8 @@ class _ResponseGeneration:
     """Whether the generation is done (set when the turn is complete)"""
     _extra_content_warned: bool = False
     """Whether we've warned about audio/text arriving after generation completed"""
+    _usage_received: bool = False
+    """Whether this generation's usageMetadata has been received"""
 
     def push_text(self, text: str) -> None:
         if self.text_ch.closed:
@@ -557,6 +585,10 @@ class RealtimeSession(llm.RealtimeSession):
         # not carry an id, since the server never issued it. kept for the session's lifetime: a
         # resumption can replay a response long after it was first queued
         self._synthetic_call_ids: set[str] = set()
+        # set when the current generation's usageMetadata lands; cleared on each new
+        # generation. drain_pending_metrics() waits on it at teardown so the final
+        # generation's token usage isn't lost when the call ends mid-turn.
+        self._usage_received_ev = asyncio.Event()
 
         self._session_resumption_handle: str | None = (
             self._opts.session_resumption.handle
@@ -946,6 +978,43 @@ class RealtimeSession(llm.RealtimeSession):
     ) -> None:
         logger.warning("truncate is not supported by the Google Realtime API.")
         pass
+
+    async def drain_pending_metrics(self) -> None:
+        """Wait (bounded) for the current generation's usageMetadata before teardown.
+
+        Gemini Live only reports token usage at the end of a generation, so when the
+        call ends mid-turn (e.g. the caller hangs up while — or right after — the agent
+        speaks) the usage event is still in flight. The framework calls this before
+        detaching its ``metrics_collected`` listener and closing the session, which is
+        what lets that final usage event still be emitted and collected. No-op when
+        nothing is pending or the underlying session is already gone.
+        """
+        if lk_google_usage_drain_timeout <= 0:
+            return
+        gen = self._current_generation
+        if gen is None or gen._usage_received:
+            return
+        if (
+            self._main_atask is None
+            or self._main_atask.done()
+            or self._msg_ch.closed
+            or self._session_should_close.is_set()
+            or self._active_session is None
+        ):
+            # not connected (or already tearing down) — the usage event can no longer
+            # arrive, so waiting would only delay the close.
+            return
+        try:
+            await asyncio.wait_for(self._usage_received_ev.wait(), lk_google_usage_drain_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "closing Gemini realtime session without usage metadata for the last "
+                "generation; its token usage will be missing",
+                extra={
+                    "response_id": gen.response_id,
+                    "timeout": lk_google_usage_drain_timeout,
+                },
+            )
 
     async def aclose(self) -> None:
         self._msg_ch.close()
@@ -1354,6 +1423,7 @@ class RealtimeSession(llm.RealtimeSession):
             audio_ch=utils.aio.Chan[rtc.AudioFrame](),
             _created_timestamp=time.time(),
         )
+        self._usage_received_ev.clear()
         if not self._realtime_model.capabilities.audio_output:
             self._current_generation.audio_ch.close()
 
@@ -1678,6 +1748,8 @@ class RealtimeSession(llm.RealtimeSession):
                 model_name=self._realtime_model.model, model_provider=self._realtime_model.provider
             ),
         )
+        current_gen._usage_received = True
+        self._usage_received_ev.set()
         self.emit("metrics_collected", metrics)
 
     def _handle_go_away(self, go_away: types.LiveServerGoAway) -> None:
