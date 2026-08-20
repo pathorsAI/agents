@@ -429,6 +429,9 @@ class _FallbackRealtimeSession(RealtimeSession[Literal["realtime_availability_ch
             audio_transcript=audio_transcript,
         )
 
+    async def drain_pending_metrics(self) -> None:
+        await self._active.drain_pending_metrics()
+
     async def aclose(self) -> None:
         # cancel an in-flight swap first, else its fresh child would leak past aclose
         if self._swap_task is not None:
