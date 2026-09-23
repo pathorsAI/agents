@@ -852,6 +852,7 @@ class AudioRecognition:
         model: NotGivenOr[str | None] = NOT_GIVEN,
         provider: NotGivenOr[str | None] = NOT_GIVEN,
         aligned_transcript: NotGivenOr[bool] = NOT_GIVEN,
+        vad_finalize: NotGivenOr[bool] = NOT_GIVEN,
         reset_context: bool = False,
     ) -> None:
         self._stt = stt
@@ -863,6 +864,8 @@ class AudioRecognition:
             self._stt_provider = provider
         if is_given(aligned_transcript):
             self._stt_aligned_transcript = aligned_transcript
+        if is_given(vad_finalize):
+            self._stt_vad_finalize = vad_finalize
         # speaker metadata belongs to the old stream; drop it so a new STT starts clean
         if reset_context:
             self.stt_context = None

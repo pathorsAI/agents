@@ -883,6 +883,9 @@ class AgentActivity(RecognitionHooks):
                     aligned_transcript=bool(resolved_stt.capabilities.aligned_transcript)
                     if isinstance(resolved_stt, stt.STT)
                     else False,
+                    vad_finalize=resolved_stt.capabilities.vad_finalize
+                    if isinstance(resolved_stt, stt.STT)
+                    else False,
                     reset_context=True,
                 )
             self._session._keyterm_detector.swap_stt(resolved_stt)
