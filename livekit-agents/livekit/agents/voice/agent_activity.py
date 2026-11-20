@@ -2606,15 +2606,18 @@ class AgentActivity(RecognitionHooks):
                 speaker_id=ev.alternatives[0].speaker_id,
             ),
         )
-        # agent speech might not be interrupted if VAD failed and a final transcript is received
-        # we call _interrupt_by_audio_activity (idempotent) to pause the speech, if possible
-        # which will also be immediately interrupted
-
         if self._audio_recognition and self._turn_detection not in (
             "manual",
             "realtime_llm",
         ):
-            self._interrupt_by_audio_activity()
+            # Same rule as on_interim_transcript: a transcript is a speech signal of its own
+            # only when there is no VAD. With a VAD, the VAD (and its min_duration) decides
+            # whether the user is talking over the agent; a final transcript it never confirmed
+            # (noise, the agent's own echo) must not cut the agent off. A real utterance the VAD
+            # missed still interrupts, later, as a committed user turn (on_end_of_turn).
+            # A pause the VAD already started is ended below by _cancel_speech_pause.
+            if self.vad is None:
+                self._interrupt_by_audio_activity()
 
             if (
                 speaking is False

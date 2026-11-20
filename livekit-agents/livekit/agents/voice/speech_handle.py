@@ -126,6 +126,15 @@ class SpeechHandle:
         return self._interrupt_fut.done()
 
     @property
+    def interrupt_source(self) -> InterruptionSource | None:
+        """Why the speech was interrupted (the first interruption's cause).
+
+        None if it wasn't interrupted, or was cancelled internally without going through
+        ``interrupt()`` (a discarded preemptive generation).
+        """
+        return self._interrupt_source
+
+    @property
     def allow_interruptions(self) -> bool:
         return self._allow_interruptions
 
