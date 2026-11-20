@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import AsyncIterable
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -166,6 +166,53 @@ def test_interim_transcript_interrupts_only_without_local_vad(
         activity._interrupt_by_audio_activity.assert_called_once_with()
     else:
         activity._interrupt_by_audio_activity.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("has_local_vad", "should_interrupt"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+async def test_final_transcript_interrupts_only_without_local_vad(
+    has_local_vad: bool, should_interrupt: bool
+) -> None:
+    """A final transcript the VAD never confirmed (noise, the agent's own echo) must not cut the
+    agent off; with a VAD only the VAD, or a committed user turn, may (#4493)."""
+    captured_events: list[UserInputTranscribedEvent] = []
+    activity = object.__new__(AgentActivity)
+    activity._agent = SimpleNamespace(llm=NOT_GIVEN, vad=NOT_GIVEN)
+    activity._session = SimpleNamespace(
+        _text_only=False,
+        llm=None,
+        vad=Mock(spec=vad.VAD) if has_local_vad else None,
+        _user_input_transcribed=captured_events.append,
+    )
+    activity._audio_recognition = Mock()
+    activity._turn_detection = None
+    activity._paused_speech = None
+    activity._cancel_speech_pause_task = None
+    activity._interrupt_by_audio_activity = Mock()
+    activity._cancel_speech_pause = AsyncMock()
+
+    activity.on_final_transcript(
+        SpeechEvent(
+            type=SpeechEventType.FINAL_TRANSCRIPT,
+            alternatives=[SpeechData(text="hello", language=LanguageCode("en"))],
+        ),
+        speaking=None,
+    )
+    await activity._cancel_speech_pause_task
+
+    assert len(captured_events) == 1
+    assert captured_events[0].transcript == "hello"
+    if should_interrupt:
+        activity._interrupt_by_audio_activity.assert_called_once_with()
+    else:
+        activity._interrupt_by_audio_activity.assert_not_called()
+    # a pause the VAD already started is still ended by the final transcript
+    activity._cancel_speech_pause.assert_awaited_once()
 
 
 async def test_events_and_metrics() -> None:
